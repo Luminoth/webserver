@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -5,7 +7,17 @@ use tokio::{
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
-// https://dev.to/geoffreycopin/-build-a-web-server-with-rust-and-tokio-part-0-the-simplest-possible-get-handler-1lhi
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Method {
+    Get,
+}
+
+#[derive(Debug, Clone)]
+pub struct Requeet {
+    method: Method,
+    path: String,
+    headers: HashMap<String, String>,
+}
 
 async fn handle_request(mut socket: TcpStream) {
     info!("handling request");
