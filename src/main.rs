@@ -1,47 +1,52 @@
 use std::collections::HashMap;
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufStream},
     net::{TcpListener, TcpStream},
 };
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 pub enum Method {
+    #[default]
+    Invalid,
     Get,
 }
 
-#[derive(Debug, Clone)]
-pub struct Requeet {
+#[derive(Debug, Default, Clone)]
+pub struct Request {
     method: Method,
     path: String,
     headers: HashMap<String, String>,
 }
 
-async fn handle_request(mut socket: TcpStream) {
-    info!("handling request");
-    let mut buf = vec![0; 1024];
+async fn handle_request(
+    _stream: &mut BufStream<TcpStream>,
+    request: Request,
+) -> anyhow::Result<()> {
+    info!("request: {:?}", request);
 
-    loop {
-        match socket.read(&mut buf).await {
-            Ok(0) => {
-                info!("remote connection closed");
-                return;
-            }
-            Ok(n) => {
-                // TODO: replace with handling the data
-                if socket.write_all(&buf[..n]).await.is_err() {
-                    info!("unexpected socket error while writing");
-                    return;
-                }
-            }
-            Err(_) => {
-                info!("unexpected socket error while reading");
-                return;
-            }
-        }
-    }
+    Ok(())
+}
+
+async fn parse_request(stream: &mut BufStream<TcpStream>) -> anyhow::Result<Request> {
+    let mut line_buffer = String::new();
+    stream.read_line(&mut line_buffer).await?;
+
+    let mut request = Request::default();
+
+    Ok(request)
+}
+
+async fn handle_connection(mut stream: BufStream<TcpStream>) -> anyhow::Result<()> {
+    let request = parse_request(&mut stream).await?;
+    handle_request(&mut stream, request).await?;
+
+    stream.write_all("OK".as_bytes()).await?;
+    stream.flush().await?;
+
+    Ok(())
 }
 
 fn init_logging() -> anyhow::Result<()> {
@@ -58,14 +63,22 @@ fn init_logging() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     init_logging()?;
 
+    // TODO: configurable address / port
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    info!("listening at {}", listener.local_addr().unwrap());
+    info!("listening at {}", listener.local_addr()?);
 
     loop {
-        let (socket, _) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
+        info!("new connection from {addr}");
 
         tokio::spawn(async move {
-            handle_request(socket).await;
+            let stream = BufStream::new(stream);
+            match handle_connection(stream).await {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("error: {e}");
+                }
+            }
         });
     }
 }
