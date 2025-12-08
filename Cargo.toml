@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+derive_more = { version = "2.1", features = ["display"] }
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
