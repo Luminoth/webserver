@@ -1,13 +1,18 @@
 use std::collections::HashMap;
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufStream},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    time::timeout,
 };
 use tracing::{Level, info};
 use tracing_subscriber::FmtSubscriber;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+const READ_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+const MAX_HEADER_SIZE: usize = 1024 * 8;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, strum::Display)]
 pub enum Method {
     Get,
 }
@@ -18,7 +23,7 @@ impl TryFrom<&str> for Method {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "GET" => Ok(Method::Get),
-            m => Err(anyhow::anyhow!("unsupported method: {m}")),
+            m => anyhow::bail!("unsupported method: {m}"),
         }
     }
 }
@@ -44,11 +49,39 @@ impl Request {
     }
 }
 
-async fn parse_request(stream: &mut BufStream<TcpStream>) -> anyhow::Result<Request> {
-    let mut line_buffer = String::new();
-    stream.read_line(&mut line_buffer).await?;
+fn next_line_break(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 2 {
+        return None;
+    }
 
-    let mut parts = line_buffer.split_whitespace();
+    let mut idx = 0;
+    loop {
+        if idx >= buf.len() - 1 {
+            return None;
+        }
+
+        if buf[idx] == '\r' as u8 && buf[idx + 1] == '\n' as u8 {
+            return Some(idx);
+        }
+
+        idx += 1;
+    }
+}
+
+async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Request> {
+    let mut buf = [0; MAX_HEADER_SIZE];
+    let n = match timeout(READ_TIMEOUT, stream.read(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(e)) => Err(e)?,
+        Err(_) => anyhow::bail!("read timeout"),
+    };
+
+    let line = match next_line_break(&buf[..n]) {
+        Some(idx) => str::from_utf8(&buf[..idx])?,
+        None => anyhow::bail!("too much"),
+    };
+
+    let mut parts = line.split_whitespace();
 
     let method: Method = parts
         .next()
@@ -62,7 +95,7 @@ async fn parse_request(stream: &mut BufStream<TcpStream>) -> anyhow::Result<Requ
 
     let mut request = Request::new(method, path);
 
-    loop {
+    /*loop {
         line_buffer.clear();
         stream.read_line(&mut line_buffer).await?;
 
@@ -78,17 +111,17 @@ async fn parse_request(stream: &mut BufStream<TcpStream>) -> anyhow::Result<Requ
             .trim();
 
         request.set_header(key.to_string(), value.to_string());
-    }
+    }*/
 
     Ok(request)
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, derive_more::Display)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, strum::Display)]
 pub enum Status {
-    #[display("200 OK")]
+    #[strum(serialize = "200 OK")]
     Ok,
 
-    #[display("404 Not Found")]
+    #[strum(serialize = "200 OK")]
     NotFound,
 }
 
@@ -110,10 +143,17 @@ impl Response {
         self.headers.insert(name, value)
     }
 
-    pub async fn write(mut self, stream: &mut BufStream<TcpStream>) -> anyhow::Result<()> {
-        stream
-            .write_all(format!("HTTP/1.1 {}\r\n\r\n", self.status).as_bytes())
-            .await?;
+    pub async fn write(mut self, stream: &mut TcpStream) -> anyhow::Result<()> {
+        match timeout(
+            WRITE_TIMEOUT,
+            stream.write_all(format!("HTTP/1.1 {}\r\n\r\n", self.status).as_bytes()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => (),
+            Ok(Err(e)) => Err(e)?,
+            Err(_) => anyhow::bail!("write timeout"),
+        }
 
         //tokio::io::copy(&mut self.data, stream).await?;
 
@@ -121,10 +161,7 @@ impl Response {
     }
 }
 
-async fn handle_request(
-    _stream: &mut BufStream<TcpStream>,
-    request: Request,
-) -> anyhow::Result<Response> {
+async fn handle_request(request: Request) -> anyhow::Result<Response> {
     info!("request: {:?}", request);
 
     let response = Response::new(Status::Ok);
@@ -133,12 +170,11 @@ async fn handle_request(
     Ok(response)
 }
 
-async fn handle_connection(mut stream: BufStream<TcpStream>) -> anyhow::Result<()> {
-    let request = parse_request(&mut stream).await?;
-    let response = handle_request(&mut stream, request).await?;
+async fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
+    let request = read_request(&mut stream).await?;
+    let response = handle_request(request).await?;
 
     response.write(&mut stream).await?;
-
     stream.flush().await?;
 
     Ok(())
@@ -167,7 +203,6 @@ async fn main() -> anyhow::Result<()> {
         info!("new connection from {addr}");
 
         tokio::spawn(async move {
-            let stream = BufStream::new(stream);
             match handle_connection(stream).await {
                 Ok(_) => {}
                 Err(e) => {
